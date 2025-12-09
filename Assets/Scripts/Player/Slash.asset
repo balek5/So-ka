@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 379b5f22d5b3c6b449994ce0a4ff76a0, type: 3}
+  m_Name: Slash
+  m_EditorClassIdentifier: 
+  spellName: Slas
+  spellPrefab: {fileID: 8240897899680350246, guid: e43e320eb39260c42b77c03fb233a3f9, type: 3}
+  cooldown: 0.5
+  speed: 25
+  baseDamage: 100
+  level: 1
+  isMelee: 1
+  projectileCount: 1
+  projectileSpreadAngle: 1
+  sizeMultiplier: 1
+  homing: 1
