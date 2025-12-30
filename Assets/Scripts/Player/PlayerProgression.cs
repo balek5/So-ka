@@ -36,15 +36,25 @@ public class PlayerProgression : MonoBehaviour
     private int pendingLevelUps = 0;
     private bool isShowingLevelUpUI = false;
 
+    private PlayerModifiers modifiers;
+
     void Start()
     {
         currentHealth = maxHealth;
+        modifiers = GetComponent<PlayerModifiers>();
+        if (modifiers == null) modifiers = gameObject.AddComponent<PlayerModifiers>();
         UpdateUI();
     }
 
     public void GainXP(int amount)
     {
-        currentXP += amount;
+        if (amount <= 0) return;
+
+        float xpMult = modifiers != null ? modifiers.xpGainMultiplier : 1f;
+        xpMult = Mathf.Max(0f, xpMult);
+        int finalAmount = Mathf.RoundToInt(amount * xpMult);
+
+        currentXP += finalAmount;
         UpdateUI();
 
         while (currentXP >= xpToNextLevel)
@@ -68,14 +78,22 @@ public class PlayerProgression : MonoBehaviour
             level++;
             UpdateUI();
 
-            if (TomeManager.Instance != null)
+            // Prefer the new loadout-based level-up flow.
+            if (LevelUpManager.Instance != null)
             {
+                LevelUpManager.Instance.ShowLevelUp(this);
+                while (LevelUpManager.Instance.ui != null && LevelUpManager.Instance.ui.IsActive())
+                    yield return null;
+            }
+            else if (TomeManager.Instance != null)
+            {
+                // Fallback to old tome-only UI
                 TomeManager.Instance.ShowLevelUpChoices();
                 while (TomeManager.Instance.IsUIActive())
-                    yield return null; // wait until player picks a tome
+                    yield return null;
             }
 
-            yield return null; 
+            yield return null;
         }
 
         isShowingLevelUpUI = false;
@@ -121,7 +139,4 @@ public class PlayerProgression : MonoBehaviour
         Debug.Log("Player Died!");
         Destroy(gameObject);
     }
-    
-    
-    
 }

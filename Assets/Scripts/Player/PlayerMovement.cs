@@ -7,13 +7,25 @@ public class PlayerMovement : MonoBehaviour
     public float jumpForce = 7f;
     public Transform cameraTransform;
 
+    [Header("Collision")]
+    [Tooltip("Layer(s) considered ground for jumping.")]
+    public LayerMask groundMask = ~0;
+
+    [Tooltip("Distance checked below the player to consider them grounded.")]
+    public float groundCheckDistance = 0.25f;
+
     private Rigidbody rb;
     private PlayerProgression playerStats;
 
     void Start()
     {
         rb = GetComponent<Rigidbody>();
-        if (cameraTransform == null)
+
+        // Reduce tunneling through MeshColliders (walls/corners)
+        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        rb.interpolation = RigidbodyInterpolation.Interpolate;
+
+        if (cameraTransform == null && Camera.main != null)
             cameraTransform = Camera.main.transform;
 
         playerStats = GetComponent<PlayerProgression>();
@@ -56,8 +68,9 @@ public class PlayerMovement : MonoBehaviour
         Vector3 move = moveDir * speed * Time.fixedDeltaTime;
         rb.MovePosition(rb.position + move);
 
-        // Jump
-        if (Input.GetButton("Jump") && Mathf.Abs(rb.linearVelocity.y) < 0.01f)
+        // Jump (use raycast grounded check instead of velocity)
+        bool grounded = Physics.Raycast(transform.position + Vector3.up * 0.05f, Vector3.down, groundCheckDistance + 0.05f, groundMask, QueryTriggerInteraction.Ignore);
+        if (Input.GetButton("Jump") && grounded)
         {
             rb.AddForce(Vector3.up * jumpForce, ForceMode.Impulse);
         }

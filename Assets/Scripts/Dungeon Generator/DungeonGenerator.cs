@@ -4,6 +4,7 @@ using System;
 
 namespace Dungeon_Generator
 {
+    // Add missing enum used throughout this file.
     public enum RoomType
     {
         Normal,
@@ -11,6 +12,9 @@ namespace Dungeon_Generator
         Shop,
         Shrine
     }
+
+    // Marker component to identify roof instances without requiring a Unity Tag.
+    internal sealed class DungeonRoofMarker : MonoBehaviour { }
 
     [DefaultExecutionOrder(-100)]
     public class DungeonGenerator : MonoBehaviour
@@ -31,6 +35,14 @@ namespace Dungeon_Generator
         public GameObject floorPrefab;
         public GameObject cornerPrefab;
         public GameObject upgradeStatuePrefab; // prefab for upgrade statues in shrine rooms
+
+        // Add the missing prefab references used by SpawnSpecialRoomPrefabs()
+        [Tooltip("Optional prefab to place in boss rooms (e.g., boss portal/marker).")]
+        public GameObject bossRoomPrefab;
+
+        [Tooltip("Optional prefab to place in shop rooms (e.g., shopkeeper/marker).")]
+        public GameObject shopRoomPrefab;
+
         public event Action DungeonGenerated;
         [Header("Special Room Highlights")]
         [Tooltip("Optional material to highlight boss rooms.")]
@@ -47,16 +59,47 @@ namespace Dungeon_Generator
         [Tooltip("Add a MeshCollider to the combined dungeon mesh.")]
         public bool addMeshCollider = true;
 
+        [Header("Optimization - Chunking")]
+        [Tooltip("If > 0, the dungeon (non-roof) mesh will be combined into collider chunks of this tile size (recommended for stable collisions). Set 0 to combine into a single mesh.")]
+        public int colliderChunkSize = 16;
+
         [Header("Spawning (logical positions only)")]
         [Tooltip("Logical spawn position for the player (center of the start room). You can use this from another script to place the player.")]
         public Vector3 playerSpawnPosition;
 
         [Tooltip("Logical spawn positions for enemies on valid floor tiles. Used by WaveSpawner or other systems.")]
         public List<Vector3> enemySpawnPositions = new List<Vector3>();
-        public GameObject bossRoomPrefab;
-        public GameObject shopRoomPrefab;
 
-   
+        [Header("Walls (height)")]
+        [Tooltip("How many wall segments to stack vertically. Set this to match your roof/ceiling height in tiles.")]
+        [Min(1)]
+        public int wallHeightInTiles = 2;
+
+        [Header("Boss Room Settings")]
+        [Tooltip("Minimum size (tiles) for the boss room.")]
+        public int bossMinRoomSize = 10;
+
+        [Tooltip("Maximum size (tiles) for the boss room.")]
+        public int bossMaxRoomSize = 16;
+
+        [Header("Roof / Ceiling")]
+        [Tooltip("Generate a roof/ceiling over every floor tile.")]
+        public bool generateRoof = true;
+
+        [Tooltip("Prefab used for roof tiles. If null, floorPrefab is reused.")]
+        public GameObject roofPrefab;
+
+        [Tooltip("If false, any colliders on roof tiles will be disabled so AI/spawns cannot use the roof as ground.")]
+        public bool roofHasCollision = false;
+
+        // New: optional mask to resolve spawn heights against the real floor (and ignore the roof)
+        [Header("Spawning (height resolution)")]
+        [Tooltip("If set, spawn positions will be raycast down against this mask to find the true floor height. Useful when the roof has colliders.")]
+        public LayerMask spawnGroundMask = ~0;
+
+        [Tooltip("Extra Y offset added after resolving the floor height.")]
+        public float spawnHeightOffset = 1.15f;
+
         // New: cache original prefab bounds so we can scale to an exact 1x1 tile
         private Vector3 floorScaleFactor = Vector3.one;
         private Vector3 wallScaleFactor = Vector3.one;
@@ -159,29 +202,35 @@ namespace Dungeon_Generator
                 }
             }
 
-            // Assign special room types: last is boss, previous is shop, previous is shrine (if enough rooms)
+            // Assign special room types
             AssignSpecialRoomTypes();
 
-            // Connect rooms with corridors that can have custom width
+            // Ensure boss room is bigger (re-carve it after selection)
+            EnlargeBossRoomIfAny();
+
+            // Connect rooms with corridors
             for (int i = 0; i < rooms.Count - 1; i++)
             {
                 ConnectRoomsWide(rooms[i], rooms[i + 1]);
             }
 
-            // Place walls and corners
+            // Place walls/corners (stacked to roof height)
             PlaceWalls();
 
-// Compute logical spawn positions AFTER layout but BEFORE combining meshes
-            ComputeSpawnPositions();
+            // Roof/ceiling (placed at y = wallHeightInTiles)
+            if (generateRoof)
+                PlaceRoof();
 
-            // Remove spawning before combine to avoid deletion
-            // SpawnUpgradeStatues();
-            // SpawnSpecialRoomPrefabs();
+            // Compute logical spawn positions AFTER layout but BEFORE combining meshes
+            ComputeSpawnPositions();
 
             if (combineIntoSingleMesh)
             {
                 CombineDungeonIntoSingleMesh();
             }
+
+            if (addBoundaryColliders)
+                CreateBoundaryColliders();
 
             // NOW spawn props so they persist
             SpawnUpgradeStatues();
@@ -190,91 +239,43 @@ namespace Dungeon_Generator
             DungeonGenerated?.Invoke();
         }
 
-        private void ComputeSpawnPositions()
+        private void EnlargeBossRoomIfAny()
         {
-            if (rooms.Count == 0)
+            if (rooms == null || rooms.Count == 0) return;
+
+            Room boss = null;
+            foreach (var r in rooms)
+            {
+                if (r.Type == RoomType.Boss)
+                {
+                    boss = r;
+                    break;
+                }
+            }
+            if (boss == null) return;
+
+            // If current boss is already large enough, keep it.
+            int desiredW = Mathf.Clamp(UnityEngine.Random.Range(bossMinRoomSize, bossMaxRoomSize + 1), 1, dungeonWidth - 2);
+            int desiredH = Mathf.Clamp(UnityEngine.Random.Range(bossMinRoomSize, bossMaxRoomSize + 1), 1, dungeonHeight - 2);
+
+            if (boss.width >= desiredW && boss.height >= desiredH)
                 return;
 
-            // Player spawn = exact center of start room, aligned to tile center (0.5 offset)
-            Room startRoom = rooms[0];
-            float centerX = startRoom.x + startRoom.width / 2f + 0.5f;
-            float centerZ = startRoom.y + startRoom.height / 2f + 0.5f;
-            // Spawn slightly above floor to avoid clipping
-            playerSpawnPosition = new Vector3(centerX, 1f, centerZ);
+            // Recenter around current boss center and clamp to bounds.
+            int cx = boss.x + boss.width / 2;
+            int cy = boss.y + boss.height / 2;
 
-            // Enemy spawns on all floor tiles except the player tile
-            for (int x = 0; x < dungeonWidth; x++)
-            {
-                for (int y = 0; y < dungeonHeight; y++)
-                {
-                    if (grid[x, y] != 1) continue; // floor only
+            int newX = Mathf.Clamp(cx - desiredW / 2, 1, dungeonWidth - desiredW - 1);
+            int newY = Mathf.Clamp(cy - desiredH / 2, 1, dungeonHeight - desiredH - 1);
 
-                    Vector3 pos = new Vector3(x + 0.5f, 0f, y + 0.5f);
+            boss.x = newX;
+            boss.y = newY;
+            boss.width = desiredW;
+            boss.height = desiredH;
 
-                    // Avoid the exact player spawn tile
-                    if (Mathf.Approximately(pos.x, playerSpawnPosition.x) && Mathf.Approximately(pos.z, playerSpawnPosition.z))
-                        continue;
-
-                    enemySpawnPositions.Add(pos);
-                }
-            }
-        }
-
-        private void AssignSpecialRoomTypes()
-        {
-            if (rooms.Count == 0) return;
-
-            // Default all to normal
-            foreach (var r in rooms)
-                r.Type = RoomType.Normal;
-
-            // Boss room: furthest from first room (simple heuristic)
-            Room start = rooms[0];
-            Room boss = start;
-            float maxDist = -1f;
-            foreach (var r in rooms)
-            {
-                float dx = (r.x + r.width / 2f) - (start.x + start.width / 2f);
-                float dy = (r.y + r.height / 2f) - (start.y + start.height / 2f);
-                float d = dx * dx + dy * dy;
-                if (d > maxDist)
-                {
-                    maxDist = d;
-                    boss = r;
-                }
-            }
-            boss.Type = RoomType.Boss;
-
-            // Shop: closest to start but not start and not boss
-            Room shop = null;
-            maxDist = float.MaxValue;
-            foreach (var r in rooms)
-            {
-                if (r == start || r == boss) continue;
-                float dx = (r.x + r.width / 2f) - (start.x + start.width / 2f);
-                float dy = (r.y + r.height / 2f) - (start.y + start.height / 2f);
-                float d = dx * dx + dy * dy;
-                if (d < maxDist)
-                {
-                    maxDist = d;
-                    shop = r;
-                }
-            }
-            if (shop != null)
-                shop.Type = RoomType.Shop;
-
-            // Shrine: some other random room that is not start/boss/shop
-            List<Room> candidates = new List<Room>();
-            foreach (var r in rooms)
-            {
-                if (r != start && r != boss && r != shop)
-                    candidates.Add(r);
-            }
-            if (candidates.Count > 0)
-            {
-                Room shrine = candidates[UnityEngine.Random.Range(0, candidates.Count)];
-                shrine.Type = RoomType.Shrine;
-            }
+            // Carve boss room area into the grid (floors). This can overwrite walls placed earlier by CreateRoom.
+            // Note: we do this BEFORE corridors/walls are generated.
+            CreateRoom(boss);
         }
 
         void CreateRoom(Room room)
@@ -390,26 +391,24 @@ namespace Dungeon_Generator
                 {
                     if (grid[x, y] == 1)
                     {
-                        // Check the four cardinal directions only to keep walls aligned to tile edges
-                        TryPlaceWallOrCorner(x + 1, y, 1, 0);   // east
-                        TryPlaceWallOrCorner(x - 1, y, -1, 0);  // west
-                        TryPlaceWallOrCorner(x, y + 1, 0, 1);   // north
-                        TryPlaceWallOrCorner(x, y - 1, 0, -1);  // south
+                        TryPlaceWallOrCorner(x + 1, y);   // east
+                        TryPlaceWallOrCorner(x - 1, y);   // west
+                        TryPlaceWallOrCorner(x, y + 1);   // north
+                        TryPlaceWallOrCorner(x, y - 1);   // south
                     }
                 }
             }
         }
 
         // Decide whether a given empty grid cell should host a straight wall or a corner piece
-        private void TryPlaceWallOrCorner(int x, int y, int dx, int dy)
+        private void TryPlaceWallOrCorner(int x, int y)
         {
             if (x < 0 || x >= dungeonWidth || y < 0 || y >= dungeonHeight)
                 return;
 
             if (grid[x, y] != 0)
-                return; // already used by something else
+                return;
 
-            // Check if this empty tile borders at least one floor: if not, skip
             if (!HasAdjacentFloor(x, y))
                 return;
 
@@ -431,12 +430,18 @@ namespace Dungeon_Generator
             if (prefab == null) return;
 
             Quaternion rot = GetWallOrCornerRotation(x, y, isCorner);
-            GameObject inst = Instantiate(prefab, new Vector3(x, 0, y), rot, transform);
-            inst.transform.localScale = Vector3.Scale(inst.transform.localScale, scaleFactor);
 
-            // mark as wall so we do not reuse this tile
+            int h = Mathf.Max(1, wallHeightInTiles);
+            for (int i = 0; i < h; i++)
+            {
+                GameObject inst = Instantiate(prefab, new Vector3(x, i, y), rot, transform);
+                inst.transform.localScale = Vector3.Scale(inst.transform.localScale, scaleFactor);
+            }
+
             grid[x, y] = 2;
         }
+
+
 
         private bool HasAdjacentFloor(int x, int y)
         {
@@ -495,6 +500,40 @@ namespace Dungeon_Generator
             return Quaternion.identity;
         }
 
+        private void AssignSpecialRoomTypes()
+        {
+            // rooms can be less than numRooms if many candidates intersect.
+            if (rooms == null || rooms.Count == 0) return;
+
+            // Reset
+            for (int i = 0; i < rooms.Count; i++)
+                rooms[i].Type = RoomType.Normal;
+
+            // Assign one boss room
+            int bossRoomIndex = UnityEngine.Random.Range(0, rooms.Count);
+            rooms[bossRoomIndex].Type = RoomType.Boss;
+
+            if (rooms.Count <= 1) return;
+
+            // Shop
+            int shopRoomIndex;
+            do
+            {
+                shopRoomIndex = UnityEngine.Random.Range(0, rooms.Count);
+            } while (shopRoomIndex == bossRoomIndex);
+            rooms[shopRoomIndex].Type = RoomType.Shop;
+
+            if (rooms.Count <= 2) return;
+
+            // Shrine
+            int shrineRoomIndex;
+            do
+            {
+                shrineRoomIndex = UnityEngine.Random.Range(0, rooms.Count);
+            } while (shrineRoomIndex == bossRoomIndex || shrineRoomIndex == shopRoomIndex);
+            rooms[shrineRoomIndex].Type = RoomType.Shrine;
+        }
+
         bool RoomIntersects(Room room)
         {
             foreach (Room other in rooms)
@@ -523,62 +562,129 @@ namespace Dungeon_Generator
             MeshFilter[] meshFilters = GetComponentsInChildren<MeshFilter>();
             if (meshFilters.Length == 0) return;
 
-            // Use the material from the first renderer we find
             Material sharedMat = null;
-            List<CombineInstance> combines = new List<CombineInstance>();
+
+            // Group non-roof meshes by chunk key, roof meshes separately.
+            var chunkCombines = new Dictionary<Vector2Int, List<CombineInstance>>();
+            var roofCombines = new List<CombineInstance>();
 
             foreach (var mf in meshFilters)
             {
-                if (mf.sharedMesh == null) continue;
+                if (mf == null || mf.sharedMesh == null) continue;
+
+                bool isRoof = mf.GetComponentInParent<DungeonRoofMarker>() != null;
+
                 MeshRenderer mr = mf.GetComponent<MeshRenderer>();
                 if (mr != null && sharedMat == null)
-                {
                     sharedMat = mr.sharedMaterial;
-                }
 
                 CombineInstance ci = new CombineInstance
                 {
                     mesh = mf.sharedMesh,
                     transform = mf.transform.localToWorldMatrix
                 };
-                combines.Add(ci);
+
+                if (isRoof)
+                {
+                    roofCombines.Add(ci);
+                    continue;
+                }
+
+                // Determine chunk by world position (tile-based)
+                Vector3 p = mf.transform.position;
+                int cs = Mathf.Max(0, colliderChunkSize);
+                Vector2Int key;
+                if (cs <= 0)
+                {
+                    key = Vector2Int.zero; // single chunk
+                }
+                else
+                {
+                    int cx = Mathf.FloorToInt(p.x / cs);
+                    int cz = Mathf.FloorToInt(p.z / cs);
+                    key = new Vector2Int(cx, cz);
+                }
+
+                if (!chunkCombines.TryGetValue(key, out var list))
+                {
+                    list = new List<CombineInstance>();
+                    chunkCombines.Add(key, list);
+                }
+                list.Add(ci);
             }
 
-            if (combines.Count == 0) return;
+            if (chunkCombines.Count == 0 && roofCombines.Count == 0) return;
 
-            // Remove all old children (individual tiles)
+            // Snapshot children before destroying.
+            var children = new List<Transform>();
             foreach (Transform child in transform)
+                children.Add(child);
+
+            // Destroy all original tile instances (including roof). We'll recreate them as combined meshes.
+            foreach (var child in children)
             {
+                if (child == null) continue;
                 Destroy(child.gameObject);
             }
 
-            // Create the combined object
-            GameObject combinedGO = new GameObject("CombinedDungeonMesh");
-            combinedGO.transform.SetParent(transform, false);
             int groundLayer = LayerMask.NameToLayer("Ground");
-            if (groundLayer != -1)
+
+            // Build chunks
+            int chunkIndex = 0;
+            foreach (var kvp in chunkCombines)
             {
-                combinedGO.layer = groundLayer;
+                var combines = kvp.Value;
+                if (combines == null || combines.Count == 0) continue;
+
+                GameObject combinedGo = new GameObject($"CombinedDungeonChunk_{kvp.Key.x}_{kvp.Key.y}_{chunkIndex}");
+                combinedGo.transform.SetParent(transform, false);
+                if (groundLayer != -1)
+                    combinedGo.layer = groundLayer;
+
+                Mesh combinedMesh = new Mesh();
+                combinedMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+                combinedMesh.CombineMeshes(combines.ToArray(), true, true);
+
+                var combinedMf = combinedGo.AddComponent<MeshFilter>();
+                combinedMf.sharedMesh = combinedMesh;
+
+                var combinedMr = combinedGo.AddComponent<MeshRenderer>();
+                if (sharedMat != null)
+                    combinedMr.sharedMaterial = sharedMat;
+
+                if (addMeshCollider)
+                {
+                    var mc = combinedGo.AddComponent<MeshCollider>();
+                    mc.sharedMesh = combinedMesh;
+                    mc.convex = false;
+                }
+
+                chunkIndex++;
             }
-            Mesh combinedMesh = new Mesh();
-            combinedMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32; // support large vertex counts
-            combinedMesh.CombineMeshes(combines.ToArray(), true, true);
 
-            MeshFilter combinedMF = combinedGO.AddComponent<MeshFilter>();
-            combinedMF.sharedMesh = combinedMesh;
-
-            MeshRenderer combinedMR = combinedGO.AddComponent<MeshRenderer>();
-            if (sharedMat != null)
+            // Combined roof (no collider by default)
+            if (roofCombines.Count > 0)
             {
-                combinedMR.sharedMaterial = sharedMat;
-            }
+                GameObject combinedRoofGo = new GameObject("CombinedRoofMesh");
+                combinedRoofGo.transform.SetParent(transform, false);
 
-            // Optional: add a single MeshCollider for the whole dungeon
-            if (addMeshCollider)
-            {
-                MeshCollider mc = combinedGO.AddComponent<MeshCollider>();
-                mc.sharedMesh = combinedMesh;
-                mc.convex = false; // static environment collider
+                Mesh roofMesh = new Mesh();
+                roofMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+                roofMesh.CombineMeshes(roofCombines.ToArray(), true, true);
+
+                var roofMf = combinedRoofGo.AddComponent<MeshFilter>();
+                roofMf.sharedMesh = roofMesh;
+
+                var roofMr = combinedRoofGo.AddComponent<MeshRenderer>();
+                if (sharedMat != null)
+                    roofMr.sharedMaterial = sharedMat;
+
+                if (roofHasCollision)
+                {
+                    var roofCol = combinedRoofGo.AddComponent<MeshCollider>();
+                    roofCol.sharedMesh = roofMesh;
+                    roofCol.convex = false;
+                }
             }
         }
 
@@ -644,6 +750,194 @@ namespace Dungeon_Generator
                 if (room.Type == RoomType.Shop && shopRoomPrefab != null)
                     Instantiate(shopRoomPrefab, pos, Quaternion.identity, shopParent);
             }
+        }
+
+        private void ComputeSpawnPositions()
+        {
+            if (rooms == null || rooms.Count == 0)
+                return;
+
+            // Player spawn = exact center of start room, aligned to tile center (0.5 offset)
+            Room startRoom = rooms[0];
+            float centerX = startRoom.x + startRoom.width / 2f + 0.5f;
+            float centerZ = startRoom.y + startRoom.height / 2f + 0.5f;
+
+            // Default fallback if we can't resolve height.
+            playerSpawnPosition = new Vector3(centerX, 1f, centerZ);
+
+            // Resolve exact floor height (ignoring roof hits) if possible.
+            playerSpawnPosition = ResolveSpawnToFloor(playerSpawnPosition);
+
+            // Enemy spawns on all floor tiles except the player tile
+            enemySpawnPositions.Clear();
+            for (int x = 0; x < dungeonWidth; x++)
+            {
+                for (int y = 0; y < dungeonHeight; y++)
+                {
+                    if (grid[x, y] != 1) continue;
+
+                    Vector3 pos = new Vector3(x + 0.5f, 1f, y + 0.5f);
+                    pos = ResolveSpawnToFloor(pos);
+
+                    if (Mathf.Approximately(pos.x, playerSpawnPosition.x) && Mathf.Approximately(pos.z, playerSpawnPosition.z))
+                        continue;
+
+                    enemySpawnPositions.Add(pos);
+                }
+            }
+        }
+
+        private Vector3 ResolveSpawnToFloor(Vector3 approxPos)
+        {
+            // Cast from above the roof to guarantee we hit something.
+            float rayStartY = Mathf.Max(wallHeightInTiles + 5f, approxPos.y + 10f);
+            Vector3 origin = new Vector3(approxPos.x, rayStartY, approxPos.z);
+
+            // Collect all hits so we can choose the highest non-roof surface (the floor),
+            // even if the roof has colliders and would be hit first.
+            RaycastHit[] hits = Physics.RaycastAll(origin, Vector3.down, 200f, spawnGroundMask, QueryTriggerInteraction.Ignore);
+            if (hits == null || hits.Length == 0)
+                return approxPos;
+
+            Array.Sort(hits, (a, b) => b.point.y.CompareTo(a.point.y)); // highest first
+
+            for (int i = 0; i < hits.Length; i++)
+            {
+                var h = hits[i];
+                if (h.collider == null) continue;
+
+                // Ignore roof tiles/meshes.
+                if (h.collider.GetComponentInParent<DungeonRoofMarker>() != null)
+                    continue;
+
+                return h.point + Vector3.up * spawnHeightOffset;
+            }
+
+            // If everything we hit was roof, fall back.
+            return approxPos;
+        }
+
+        private void PlaceRoof()
+        {
+            // Prefer explicit roofPrefab, otherwise reuse floorPrefab.
+            var prefab = roofPrefab != null ? roofPrefab : floorPrefab;
+
+            // If nothing is assigned, fall back to a simple primitive so the roof still generates.
+            if (prefab == null)
+            {
+                Debug.LogWarning("[DungeonGenerator] No roofPrefab or floorPrefab assigned; generating roof using Cube primitives as fallback.");
+            }
+
+            float roofY = Mathf.Max(1, wallHeightInTiles);
+            int roofCount = 0;
+
+            for (int x = 0; x < dungeonWidth; x++)
+            {
+                for (int y = 0; y < dungeonHeight; y++)
+                {
+                    if (grid[x, y] != 1) continue;
+
+                    // Match floor tile coordinate convention used elsewhere: tiles are centered at +0.5f.
+                    Vector3 roofPos = new Vector3(x + 0.5f, roofY, y + 0.5f);
+
+                    GameObject r;
+                    if (prefab != null)
+                    {
+                        r = Instantiate(prefab, roofPos, Quaternion.identity, transform);
+                        // Reuse floor scaling so roof tiles stay 1x1.
+                        r.transform.localScale = Vector3.Scale(r.transform.localScale, floorScaleFactor);
+                    }
+                    else
+                    {
+                        r = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                        r.transform.SetParent(transform, false);
+                        r.transform.position = roofPos;
+                        r.transform.localScale = new Vector3(1f, 0.2f, 1f);
+                    }
+
+                    r.name = $"Roof_{x}_{y}";
+
+                    // Mark as roof without requiring a Unity Tag.
+                    if (r.GetComponent<DungeonRoofMarker>() == null)
+                        r.AddComponent<DungeonRoofMarker>();
+
+                    if (!roofHasCollision)
+                    {
+                        foreach (var col in r.GetComponentsInChildren<Collider>(true))
+                            col.enabled = false;
+                    }
+
+                    roofCount++;
+                }
+            }
+
+            if (logRoofGeneration)
+                Debug.Log($"[DungeonGenerator] Roof generated: {roofCount} tiles at y={roofY} (generateRoof={generateRoof}).");
+        }
+
+        [Header("Debug")]
+        public bool logRoofGeneration = false;
+
+        [Header("Collision Helpers")]
+        [Tooltip("Creates simple box colliders around the dungeon edges to prevent escaping through corners or over walls.")]
+        public bool addBoundaryColliders = true;
+
+        [Tooltip("Height of boundary colliders. Set higher than the maximum jump.")]
+        public float boundaryHeight = 6f;
+
+        [Tooltip("Thickness of boundary colliders.")]
+        public float boundaryThickness = 1f;
+
+        private void CreateBoundaryColliders()
+        {
+            var parentGo = GameObject.Find("DungeonCollisionBounds");
+            if (parentGo == null)
+            {
+                parentGo = new GameObject("DungeonCollisionBounds");
+                parentGo.transform.SetParent(transform, false);
+            }
+            else
+            {
+                // Clear old bounds if regenerating.
+                foreach (Transform c in parentGo.transform)
+                    Destroy(c.gameObject);
+            }
+
+            float minX = 0f;
+            float maxX = dungeonWidth;
+            float minZ = 0f;
+            float maxZ = dungeonHeight;
+
+            float yCenter = boundaryHeight * 0.5f;
+
+            // North
+            CreateBoundaryWall(parentGo.transform,
+                new Vector3((minX + maxX) * 0.5f, yCenter, maxZ + boundaryThickness * 0.5f),
+                new Vector3((maxX - minX) + boundaryThickness * 2f, boundaryHeight, boundaryThickness));
+
+            // South
+            CreateBoundaryWall(parentGo.transform,
+                new Vector3((minX + maxX) * 0.5f, yCenter, minZ - boundaryThickness * 0.5f),
+                new Vector3((maxX - minX) + boundaryThickness * 2f, boundaryHeight, boundaryThickness));
+
+            // East
+            CreateBoundaryWall(parentGo.transform,
+                new Vector3(maxX + boundaryThickness * 0.5f, yCenter, (minZ + maxZ) * 0.5f),
+                new Vector3(boundaryThickness, boundaryHeight, (maxZ - minZ) + boundaryThickness * 2f));
+
+            // West
+            CreateBoundaryWall(parentGo.transform,
+                new Vector3(minX - boundaryThickness * 0.5f, yCenter, (minZ + maxZ) * 0.5f),
+                new Vector3(boundaryThickness, boundaryHeight, (maxZ - minZ) + boundaryThickness * 2f));
+        }
+
+        private static void CreateBoundaryWall(Transform parent, Vector3 center, Vector3 size)
+        {
+            var go = new GameObject("Boundary");
+            go.transform.SetParent(parent, false);
+            go.transform.position = center;
+            var bc = go.AddComponent<BoxCollider>();
+            bc.size = size;
         }
     }
 

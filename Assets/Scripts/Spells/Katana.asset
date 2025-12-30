@@ -1,0 +1,26 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 379b5f22d5b3c6b449994ce0a4ff76a0, type: 3}
+  m_Name: Katana
+  m_EditorClassIdentifier: 
+  spellName: Katana
+  spellPrefab: {fileID: 2183146480622160771, guid: 131ad0e894ecda14eac32155d82d6c3d, type: 3}
+  cooldown: 0.5
+  speed: 20
+  baseDamage: 1000
+  level: 1
+  isMelee: 1
+  spawnOnTarget: 1
+  projectileCount: 12
+  projectileSpreadAngle: 15
+  sizeMultiplier: 1
+  homing: 0

@@ -11,6 +11,10 @@ public class Spell : ScriptableObject
     public int level = 1;
     public bool isMelee = false;
 
+    [Header("Spawn / Targeting")]
+    [Tooltip("If true, the prefab is spawned on the enemy position (katana slash VFX, debuffs, etc.).")]
+    public bool spawnOnTarget = false;
+
     // New features
     public int projectileCount = 1;   // How many projectiles spawn per cast
     public float projectileSpreadAngle = 15f; // Spread if more than 1 projectile

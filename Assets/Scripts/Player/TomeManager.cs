@@ -50,7 +50,7 @@ public class TomeManager : MonoBehaviour
         // Pick 3 random unique tomes
         List<Tome> choices = new List<Tome>();
         int attempts = 0;
-        while (choices.Count < 3 && attempts < 20)
+        while (choices.Count < 3 && attempts < 40)
         {
             attempts++;
             Tome t = allTomes[Random.Range(0, allTomes.Count)];
@@ -62,7 +62,8 @@ public class TomeManager : MonoBehaviour
         {
             GameObject buttonObj = Instantiate(choiceButtonPrefab, choiceParent);
             TextMeshProUGUI txt = buttonObj.GetComponentInChildren<TextMeshProUGUI>();
-            txt.text = $"{t.tomeName}\n+{t.percentIncrease * 100}% {t.type}";
+            if (txt != null)
+                txt.text = FormatTomeText(t);
 
             Tome localTome = t;
             buttonObj.GetComponent<Button>().onClick.AddListener(() =>
@@ -72,110 +73,146 @@ public class TomeManager : MonoBehaviour
         }
     }
 
-void ApplyTome(Tome tome)
-{
-    PlayerProgression player = GameObject.FindGameObjectWithTag("Player")?.GetComponent<PlayerProgression>();
-    if (player == null)
+    private static string FormatTomeText(Tome t)
     {
-        Debug.LogError("No Player found to apply tome!");
-        return;
+        if (t == null) return string.Empty;
+
+        float mult = 1f + t.percentIncrease;
+
+        switch (t.type)
+        {
+            case TomeType.Damage:
+                return $"{t.tomeName}\nDamage x{mult:0.##}";
+            case TomeType.AttackSpeed:
+                return $"{t.tomeName}\nAttack Speed x{mult:0.##}";
+            case TomeType.Size:
+                return $"{t.tomeName}\nSize x{mult:0.##}";
+            case TomeType.XPGain:
+                return $"{t.tomeName}\nXP Gain x{mult:0.##}";
+
+            case TomeType.ProjectileCount:
+                // Your apply logic always gives at least +1.
+                return $"{t.tomeName}\n+1 Projectile";
+
+            case TomeType.Chaos:
+                return $"{t.tomeName}\nCHAOS (massive boosts)";
+
+            default:
+                return $"{t.tomeName}\n+{t.percentIncrease * 100f:0.#}% {t.type}";
+        }
     }
 
-    switch (tome.type)
+    void ApplyTome(Tome tome)
     {
-        case TomeType.MoveSpeed:
-            player.moveSpeed *= 1 + tome.percentIncrease;
-            break;
-        case TomeType.AttackSpeed:
-            player.attackSpeed *= 1 + tome.percentIncrease;
-            break;
-       
-        case TomeType.SpellDamage:
-            player.spellDamageMultiplier *= 1 + tome.percentIncrease;
-            break;
-      
-        case TomeType.CritChance:
-            player.critChance += tome.percentIncrease;
-            break;
-
-        // New spell tomes
-        case TomeType.ProjectileCount:
-            foreach (var spell in player.GetComponent<PlayerSpells>().equippedSpells)
-            {
-                if (spell != null)
-                    spell.projectileCount += Mathf.Max(1, Mathf.RoundToInt(spell.projectileCount * tome.percentIncrease));
-            }
-            break;
-        case TomeType.ProjectileSize:
-            foreach (var spell in player.GetComponent<PlayerSpells>().equippedSpells)
-            {
-                if (spell != null)
-                    spell.sizeMultiplier *= 1 + tome.percentIncrease;
-            }
-            break;
+        var playerGo = GameObject.FindGameObjectWithTag("Player");
+        PlayerProgression player = playerGo != null ? playerGo.GetComponent<PlayerProgression>() : null;
+        if (player == null)
+        {
+            Debug.LogError("No Player found to apply tome!");
+            return;
         }
 
-    // Hide UI
-    TomeManager.Instance.HideLevelUpUI();
-}
-public void ShowStatueUpgrades(List<UpgradeStatue.StatueUpgradeOption> options)
-{
-    if (uiActive) return;
+        PlayerModifiers mods = playerGo.GetComponent<PlayerModifiers>();
+        if (mods == null) mods = playerGo.AddComponent<PlayerModifiers>();
 
-    uiActive = true;
-    levelUpPanel.SetActive(true);
+        float inc = tome.percentIncrease;
 
-    // Clear old buttons
-    foreach (Transform child in choiceParent)
-        Destroy(child.gameObject);
-
-    // Create buttons for each option
-    foreach (var opt in options)
-    {
-        GameObject btnObj = Instantiate(choiceButtonPrefab, choiceParent);
-        TMP_Text txt = btnObj.GetComponentInChildren<TMP_Text>();
-        txt.text = opt.optionName;
-
-        UpgradeStatue.StatueUpgradeOption localOpt = opt;
-        btnObj.GetComponent<Button>().onClick.AddListener(() =>
+        switch (tome.type)
         {
-            ApplyStatueUpgrade(localOpt);
-        });
-    }
-}
+            case TomeType.AttackSpeed:
+                // Base stat (other systems can use it too)
+                player.attackSpeed *= 1 + inc;
+                break;
 
-private void ApplyStatueUpgrade(UpgradeStatue.StatueUpgradeOption option)
-{
-    PlayerProgression player = GameObject.FindGameObjectWithTag("Player")?.GetComponent<PlayerProgression>();
-    if (player == null)
+            case TomeType.Damage:
+                mods.damageMultiplier *= 1 + inc;
+                break;
+
+            case TomeType.ProjectileCount:
+                mods.bonusProjectiles += Mathf.Max(1, Mathf.RoundToInt(inc * 1f));
+                break;
+
+            case TomeType.Size:
+                mods.sizeMultiplier *= 1 + inc;
+                break;
+
+            case TomeType.XPGain:
+                mods.xpGainMultiplier *= 1 + inc;
+                break;
+
+            case TomeType.Chaos:
+                // Broken tome: big boosts.
+                mods.damageMultiplier *= 1 + (inc * 2.5f);
+                mods.attackSpeedMultiplier *= 1 + (inc * 1.5f);
+                mods.sizeMultiplier *= 1 + (inc * 1.5f);
+                mods.cooldownMultiplier *= Mathf.Max(0.05f, 1f - (inc * 0.75f));
+                mods.bonusProjectiles += Mathf.Max(2, Mathf.RoundToInt(2 + inc * 3f));
+                mods.xpGainMultiplier *= 1 + (inc * 2f);
+                break;
+        }
+
+        player.UpdateUI();
+
+        // Hide UI
+        HideLevelUpUI();
+    }
+
+    public void ShowStatueUpgrades(List<UpgradeStatue.StatueUpgradeOption> options)
     {
-        Debug.LogError("No Player found to apply upgrade!");
-        return;
+        if (uiActive) return;
+
+        uiActive = true;
+        levelUpPanel.SetActive(true);
+
+        // Clear old buttons
+        foreach (Transform child in choiceParent)
+            Destroy(child.gameObject);
+
+        // Create buttons for each option
+        foreach (var opt in options)
+        {
+            GameObject btnObj = Instantiate(choiceButtonPrefab, choiceParent);
+            TMP_Text txt = btnObj.GetComponentInChildren<TMP_Text>();
+            if (txt != null) txt.text = opt.optionName;
+
+            UpgradeStatue.StatueUpgradeOption localOpt = opt;
+            btnObj.GetComponent<Button>().onClick.AddListener(() =>
+            {
+                ApplyStatueUpgrade(localOpt);
+            });
+        }
     }
 
-    player.moveSpeed += option.moveSpeedIncrease;
-    player.attackSpeed += option.attackSpeedIncrease;
-    player.maxHealth += option.maxHealthIncrease;
-    player.currentHealth += option.maxHealthIncrease;
-    player.critChance += option.critChanceIncrease;
+    private void ApplyStatueUpgrade(UpgradeStatue.StatueUpgradeOption option)
+    {
+        PlayerProgression player = GameObject.FindGameObjectWithTag("Player")?.GetComponent<PlayerProgression>();
+        if (player == null)
+        {
+            Debug.LogError("No Player found to apply upgrade!");
+            return;
+        }
 
-    player.UpdateUI();
+        player.moveSpeed += option.moveSpeedIncrease;
+        player.attackSpeed += option.attackSpeedIncrease;
+        player.maxHealth += option.maxHealthIncrease;
+        player.currentHealth += option.maxHealthIncrease;
+        player.critChance += option.critChanceIncrease;
 
-    HideLevelUpUI();
-}
+        player.UpdateUI();
 
-public void HideLevelUpUI()
-{
-    if (levelUpPanel != null)
-        levelUpPanel.SetActive(false);
+        HideLevelUpUI();
+    }
 
-    uiActive = false;
-}
+    public void HideLevelUpUI()
+    {
+        if (levelUpPanel != null)
+            levelUpPanel.SetActive(false);
+
+        uiActive = false;
+    }
 
     public bool IsUIActive()
     {
         return uiActive;
     }
-    
-    
 }

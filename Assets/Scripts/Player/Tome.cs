@@ -2,16 +2,22 @@
 
 public enum TomeType
 {
-    MoveSpeed,
     AttackSpeed,
 
-    SpellDamage,
-    CritChance,
+    Damage,
+
+    // Spell shaping
     ProjectileCount,
-    ProjectileSize,
+    Size,
+
+    // Progression
+    XPGain,
+
+    // Special
+    Chaos,
 }
 
-[CreateAssetMenu(fileName = "NewTome", menuName = "Megabonk/Tome")]
+[CreateAssetMenu(fileName = "NewTome", menuName = "Tomes/Tome")]
 public class Tome : ScriptableObject
 {
     public string tomeName;
